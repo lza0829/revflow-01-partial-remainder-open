@@ -32,7 +32,7 @@ const maxCount = computed(() => {
           <p class="label">账户余额合计</p>
           <p class="amount">¥ {{ yuan(data.余额合计分) }}</p>
           <p class="hint">
-            待归并 {{ data.待归并 }} 笔
+            待归并 {{ data.待归并 }} 笔 · 剩余敞口 ¥ {{ yuan(data.剩余敞口分) }}
             <template v-if="data.最近归并">
               · 最近归并 #{{ data.最近归并.id }}（隔离 {{ data.最近归并.quarantine_count }}）
             </template>
@@ -56,6 +56,22 @@ const maxCount = computed(() => {
           </div>
         </div>
       </section>
+
+      <div class="stats">
+        <div class="stat">
+          <p class="k">已冲累计</p>
+          <p class="v">¥ {{ yuan(data.已冲累计分) }}</p>
+        </div>
+        <div class="stat">
+          <p class="k">剩余敞口合计</p>
+          <p class="v">¥ {{ yuan(data.剩余敞口分) }}</p>
+        </div>
+        <div class="stat">
+          <p class="k">闭口 / 部分冲正向</p>
+          <p class="v">{{ data.闭口正向数 }} / {{ data.部分冲正向数 }}</p>
+        </div>
+      </div>
+      <p v-if="data.敞口不符数" class="msg">敞口守恒校验不符 {{ data.敞口不符数 }} 笔，请查归并台。</p>
 
       <h2 class="section-title">账户余额</h2>
       <div class="panel">

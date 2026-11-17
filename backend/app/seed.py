@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS quarantine_items (
   reason TEXT NOT NULL,
   amount_cents INTEGER NOT NULL,
   settle_run_id INTEGER NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  target_entry_key TEXT,
+  excess_cents INTEGER NOT NULL DEFAULT 0,
+  exposure_cents INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settle_runs (
   id INTEGER PRIMARY KEY,
@@ -46,7 +49,24 @@ CREATE TABLE IF NOT EXISTS settle_runs (
   quarantine_count INTEGER NOT NULL DEFAULT 0,
   net_cents INTEGER NOT NULL DEFAULT 0,
   started_at TEXT NOT NULL,
-  finished_at TEXT
+  finished_at TEXT,
+  reversed_total_cents INTEGER NOT NULL DEFAULT 0,
+  open_cents INTEGER NOT NULL DEFAULT 0,
+  closed_count INTEGER NOT NULL DEFAULT 0,
+  excess_quarantine_count INTEGER NOT NULL DEFAULT 0,
+  exposure_mismatch_count INTEGER NOT NULL DEFAULT 0,
+  commit_mode TEXT NOT NULL DEFAULT '单事务',
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS forward_exposures (
+  forward_entry_key TEXT PRIMARY KEY REFERENCES ledger_entries(entry_key),
+  original_cents INTEGER NOT NULL,
+  reversed_cents INTEGER NOT NULL DEFAULT 0,
+  remaining_cents INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT '未冲',
+  last_reversal_key TEXT,
+  last_settle_run_id INTEGER,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS verify_reports (
   id INTEGER PRIMARY KEY,
@@ -61,11 +81,37 @@ CREATE TABLE IF NOT EXISTS verify_reports (
 """
 
 
+#: 底座快照升级：旧库按列补齐，不丢已有流水。
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("quarantine_items", "target_entry_key", "TEXT"),
+    ("quarantine_items", "excess_cents", "INTEGER NOT NULL DEFAULT 0"),
+    ("quarantine_items", "exposure_cents", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "reversed_total_cents", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "open_cents", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "closed_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "excess_quarantine_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "exposure_mismatch_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("settle_runs", "commit_mode", "TEXT NOT NULL DEFAULT '单事务'"),
+    ("settle_runs", "note", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _migrate(conn) -> None:
+    for table, column, ddl in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         n = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
         if n:
+            # 已存在库也补齐敞口行（幂等，不覆盖已冲累计）
+            _ensure_exposures(conn)
+            conn.commit()
             return
         seed_path = FIXTURES_DIR / "seed.json"
         data = json.loads(Path(seed_path).read_text(encoding="utf-8"))
@@ -113,4 +159,13 @@ def init_db() -> None:
                     e.get("note", ""),
                 ),
             )
+        _ensure_exposures(conn)
         conn.commit()
+
+
+def _ensure_exposures(conn) -> None:
+    from app.modules import partial_cascade
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    partial_cascade.ensure_rows(conn, now)
